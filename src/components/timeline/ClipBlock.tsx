@@ -55,6 +55,8 @@ export function ClipBlock({ clip, track }: ClipBlockProps) {
     const startX = e.clientX;
     const origStart = clip.startTime;
     const origDuration = clip.duration;
+    const origAudioOffset = clip.audioOffset ?? 0;
+    const origAudioDuration = clip.audioDuration ?? clip.duration;
     const bpm = project?.bpm ?? 120;
     const totalDuration = project?.totalDuration ?? 600;
     dragRef.current = false;
@@ -71,16 +73,33 @@ export function ClipBlock({ clip, track }: ClipBlockProps) {
         newStart = Math.max(0, Math.min(newStart, totalDuration - origDuration));
         updateClip(clip.id, { startTime: newStart });
       } else if (mode === 'resize-left') {
+        // Dragging left edge: crops from the start of the audio
         let newStart = snapToGrid(origStart + deltaSec, bpm, 1);
         newStart = Math.max(0, newStart);
         const maxStart = origStart + origDuration - MIN_CLIP_DURATION;
         newStart = Math.min(newStart, maxStart);
+
+        const shift = newStart - origStart;
+        // Constrain: can't crop past the audio buffer end
+        let newAudioOffset = origAudioOffset + shift;
+        if (newAudioOffset < 0) {
+          newStart = origStart - origAudioOffset;
+          newAudioOffset = 0;
+        }
+        if (newAudioOffset > origAudioDuration - MIN_CLIP_DURATION) {
+          newAudioOffset = origAudioDuration - MIN_CLIP_DURATION;
+          newStart = origStart + (newAudioOffset - origAudioOffset);
+        }
         const newDuration = origDuration + (origStart - newStart);
-        updateClip(clip.id, { startTime: newStart, duration: newDuration });
+        updateClip(clip.id, { startTime: newStart, duration: newDuration, audioOffset: newAudioOffset });
       } else {
+        // Dragging right edge: crops from the end of the audio
         let newDuration = snapToGrid(origDuration + deltaSec, bpm, 1);
         newDuration = Math.max(MIN_CLIP_DURATION, newDuration);
         newDuration = Math.min(newDuration, totalDuration - origStart);
+        // Can't extend past audio buffer end
+        const maxDuration = origAudioDuration - origAudioOffset;
+        newDuration = Math.min(newDuration, maxDuration);
         updateClip(clip.id, { duration: newDuration });
       }
     };
@@ -92,7 +111,7 @@ export function ClipBlock({ clip, track }: ClipBlockProps) {
 
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
-  }, [clip.id, clip.startTime, clip.duration, pixelsPerSecond, project, updateClip, getDragMode]);
+  }, [clip.id, clip.startTime, clip.duration, clip.audioOffset, clip.audioDuration, pixelsPerSecond, project, updateClip, getDragMode]);
 
   const handleClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -135,9 +154,19 @@ export function ClipBlock({ clip, track }: ClipBlockProps) {
     stale: 'opacity-50',
   };
 
-  // Render waveform peaks at a fixed pixel density (not stretched)
+  // Crop waveform peaks to the visible region
+  const audioDuration = clip.audioDuration ?? clip.duration;
+  const audioOffset = clip.audioOffset ?? 0;
   const peakWidthPx = width - 4; // padding
-  const numBars = peaks ? Math.min(peaks.length, Math.floor(peakWidthPx / 2)) : 0;
+
+  // Determine visible portion of peaks array
+  const startPeakIdx = peaks ? Math.floor((audioOffset / audioDuration) * peaks.length) : 0;
+  const endPeakIdx = peaks ? Math.min(
+    Math.ceil(((audioOffset + clip.duration) / audioDuration) * peaks.length),
+    peaks.length,
+  ) : 0;
+  const visiblePeakCount = endPeakIdx - startPeakIdx;
+  const numBars = peaks ? Math.min(visiblePeakCount, Math.floor(peakWidthPx / 2)) : 0;
   const barSpacing = numBars > 0 ? peakWidthPx / numBars : 0;
 
   return (
@@ -174,8 +203,8 @@ export function ClipBlock({ clip, track }: ClipBlockProps) {
               className="opacity-60 ml-0.5"
             >
               {Array.from({ length: numBars }, (_, i) => {
-                const peakIdx = Math.floor((i / numBars) * peaks.length);
-                const peak = peaks[peakIdx];
+                const peakIdx = startPeakIdx + Math.floor((i / numBars) * visiblePeakCount);
+                const peak = peaks[Math.min(peakIdx, peaks.length - 1)];
                 const h = peak * 80;
                 return (
                   <rect

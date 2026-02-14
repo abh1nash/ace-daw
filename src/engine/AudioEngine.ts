@@ -12,6 +12,8 @@ export interface ClipScheduleInfo {
   trackId: string;
   startTime: number;
   buffer: AudioBuffer;
+  audioOffset: number;   // offset into the buffer (crop start)
+  clipDuration: number;  // how long to play (crop length)
 }
 
 /**
@@ -95,16 +97,19 @@ export class AudioEngine {
       source.buffer = clip.buffer;
       source.connect(trackNode.inputGain);
 
-      const clipEnd = clip.startTime + clip.buffer.duration;
+      const clipEnd = clip.startTime + clip.clipDuration;
       if (clipEnd <= fromTime) continue;
 
       const contextNow = this.ctx.currentTime;
       if (clip.startTime >= fromTime) {
+        // Clip hasn't started: schedule with delay, start from audioOffset
         const delay = clip.startTime - fromTime;
-        source.start(contextNow + delay, 0);
+        source.start(contextNow + delay, clip.audioOffset, clip.clipDuration);
       } else {
-        const bufferOffset = fromTime - clip.startTime;
-        source.start(contextNow, bufferOffset);
+        // Clip already started: seek into it
+        const seekOffset = fromTime - clip.startTime;
+        const remaining = clip.clipDuration - seekOffset;
+        source.start(contextNow, clip.audioOffset + seekOffset, remaining);
       }
 
       this.scheduledSources.push({
