@@ -28,7 +28,8 @@ export async function listModels(): Promise<ModelsListResponse> {
 export async function getStats(): Promise<StatsResponse> {
   const res = await fetch(`${API_BASE}/v1/stats`);
   if (!res.ok) throw new Error(`getStats failed: ${res.status}`);
-  return res.json();
+  const envelope: ApiEnvelope<StatsResponse> = await res.json();
+  return envelope.data;
 }
 
 export async function releaseLegoTask(

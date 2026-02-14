@@ -1,4 +1,4 @@
-import { get, set, del } from 'idb-keyval';
+import { get, set, del, keys } from 'idb-keyval';
 
 function makeKey(projectId: string, clipId: string, type: 'cumulative' | 'isolated'): string {
   return `audio:${projectId}:${clipId}:${type}`;
@@ -38,6 +38,8 @@ export async function deleteAudioBlob(
 }
 
 export async function deleteAllProjectAudio(projectId: string): Promise<void> {
-  // idb-keyval doesn't support prefix queries, so we track keys in the project
-  // For now, individual deletion is handled per-clip
+  const prefix = `audio:${projectId}:`;
+  const allKeys = await keys();
+  const toDelete = allKeys.filter((k) => typeof k === 'string' && k.startsWith(prefix));
+  await Promise.all(toDelete.map((k) => del(k)));
 }

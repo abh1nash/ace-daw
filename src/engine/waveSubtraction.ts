@@ -20,11 +20,14 @@ export function isolateTrackAudio(
 
   for (let ch = 0; ch < currentMix.numberOfChannels; ch++) {
     const curr = currentMix.getChannelData(ch);
-    const prev = previousMix.getChannelData(ch);
+    // If previous mix has fewer channels, treat missing channels as silence
+    const prev = ch < previousMix.numberOfChannels
+      ? previousMix.getChannelData(ch)
+      : null;
     const out = isolated.getChannelData(ch);
 
     for (let i = 0; i < curr.length; i++) {
-      out[i] = curr[i] - (i < prev.length ? prev[i] : 0);
+      out[i] = curr[i] - (prev && i < prev.length ? prev[i] : 0);
     }
   }
 
