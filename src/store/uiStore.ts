@@ -10,6 +10,7 @@ interface UIState {
   showInstrumentPicker: boolean;
   showExportDialog: boolean;
   showSettingsDialog: boolean;
+  showProjectListDialog: boolean;
 
   setPixelsPerSecond: (pps: number) => void;
   zoomIn: () => void;
@@ -23,6 +24,7 @@ interface UIState {
   setShowInstrumentPicker: (v: boolean) => void;
   setShowExportDialog: (v: boolean) => void;
   setShowSettingsDialog: (v: boolean) => void;
+  setShowProjectListDialog: (v: boolean) => void;
 }
 
 const ZOOM_LEVELS = [10, 25, 50, 100, 200, 500];
@@ -37,6 +39,7 @@ export const useUIStore = create<UIState>((set) => ({
   showInstrumentPicker: false,
   showExportDialog: false,
   showSettingsDialog: false,
+  showProjectListDialog: false,
 
   setPixelsPerSecond: (pps) => set({ pixelsPerSecond: pps }),
 
@@ -75,4 +78,5 @@ export const useUIStore = create<UIState>((set) => ({
   setShowInstrumentPicker: (v) => set({ showInstrumentPicker: v }),
   setShowExportDialog: (v) => set({ showExportDialog: v }),
   setShowSettingsDialog: (v) => set({ showSettingsDialog: v }),
+  setShowProjectListDialog: (v) => set({ showProjectListDialog: v }),
 }));

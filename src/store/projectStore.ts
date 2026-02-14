@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 import { v4 as uuidv4 } from 'uuid';
 import type { Project, Track, Clip, TrackName, ClipGenerationStatus } from '../types/project';
 import { TRACK_CATALOG } from '../constants/tracks';
@@ -9,6 +10,7 @@ import {
   DEFAULT_PROJECT_NAME,
   DEFAULT_GENERATION,
 } from '../constants/defaults';
+import { saveProject as saveProjectToIDB } from '../services/projectStorage';
 
 const MIN_TIMELINE_DURATION = 30; // seconds
 const TIMELINE_PADDING = 10;      // seconds beyond last clip
@@ -16,6 +18,7 @@ const TIMELINE_PADDING = 10;      // seconds beyond last clip
 interface ProjectState {
   project: Project | null;
 
+  setProject: (project: Project) => void;
   createProject: (params?: {
     name?: string;
     bpm?: number;
@@ -52,8 +55,12 @@ function computeTotalDuration(tracks: Track[]): number {
   return Math.max(MIN_TIMELINE_DURATION, maxEnd + TIMELINE_PADDING);
 }
 
-export const useProjectStore = create<ProjectState>((set, get) => ({
+export const useProjectStore = create<ProjectState>()(
+  persist(
+    (set, get) => ({
   project: null,
+
+  setProject: (project) => set({ project }),
 
   createProject: (params) => {
     const project: Project = {
@@ -217,15 +224,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
     if (!sourceClip || !trackId) return undefined;
 
+    const isReady = sourceClip.generationStatus === 'ready' && !!sourceClip.isolatedAudioKey;
     const newClip: Clip = {
       ...sourceClip,
       id: uuidv4(),
       startTime: sourceClip.startTime + sourceClip.duration,
-      generationStatus: sourceClip.generationStatus === 'ready' ? 'ready' : 'empty',
+      generationStatus: isReady ? 'ready' : 'empty',
       generationJobId: null,
-      cumulativeMixKey: null,
-      isolatedAudioKey: sourceClip.isolatedAudioKey,
-      waveformPeaks: sourceClip.waveformPeaks ? [...sourceClip.waveformPeaks] : null,
+      cumulativeMixKey: sourceClip.cumulativeMixKey,
+      isolatedAudioKey: isReady ? sourceClip.isolatedAudioKey : null,
+      waveformPeaks: isReady && sourceClip.waveformPeaks ? [...sourceClip.waveformPeaks] : null,
     };
 
     const newTracks = state.project.tracks.map((t) =>
@@ -292,4 +300,21 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!project) return MIN_TIMELINE_DURATION;
     return project.totalDuration;
   },
-}));
+}),
+    {
+      name: 'ace-step-daw-project',
+      partialize: (state) => ({ project: state.project }),
+    },
+  ),
+);
+
+// Auto-save to project library (IDB) on changes, debounced
+let _saveTimer: ReturnType<typeof setTimeout>;
+useProjectStore.subscribe((state) => {
+  if (!state.project) return;
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => {
+    const proj = useProjectStore.getState().project;
+    if (proj) saveProjectToIDB(proj);
+  }, 1000);
+});

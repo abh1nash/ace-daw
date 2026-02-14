@@ -10,6 +10,7 @@ import { NewProjectDialog } from '../dialogs/NewProjectDialog';
 import { InstrumentPicker } from '../dialogs/InstrumentPicker';
 import { ExportDialog } from '../dialogs/ExportDialog';
 import { SettingsDialog } from '../dialogs/SettingsDialog';
+import { ProjectListDialog } from '../dialogs/ProjectListDialog';
 import { useAudioEngine } from '../../hooks/useAudioEngine';
 import { useProjectStore } from '../../store/projectStore';
 import { useUIStore } from '../../store/uiStore';
@@ -76,6 +77,7 @@ export function AppShell() {
       <InstrumentPicker />
       <ExportDialog />
       <SettingsDialog />
+      <ProjectListDialog />
     </div>
   );
 }
