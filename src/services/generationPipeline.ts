@@ -153,6 +153,11 @@ async function generateClipInternal(
       params.sample_query = clip.prompt;
     }
 
+    // Auto-expand prompt: controls whether LM rewrites the caption via CoT
+    if (clip.autoExpandPrompt === false) {
+      params.use_cot_caption = false;
+    }
+
     // Submit task
     useGenerationStore.getState().updateJob(jobId, { status: 'generating', progress: 'Submitting...' });
     useProjectStore.getState().updateClipStatus(clipId, 'generating');
@@ -212,15 +217,20 @@ async function generateClipInternal(
 
     const fullIsolatedBuffer = isolateTrackAudio(engine.ctx, cumulativeBuffer, previousBuffer);
 
+    // Re-read clip from store in case the user moved/resized it during generation
+    const currentClip = useProjectStore.getState().getClipById(clipId);
+    const clipStart = currentClip?.startTime ?? clip.startTime;
+    const clipDuration = currentClip?.duration ?? clip.duration;
+
     // Trim isolated audio to just the clip's time region so the buffer
     // represents only the clip's audio (not the full project duration).
     const sampleRate = fullIsolatedBuffer.sampleRate;
-    const startSample = Math.floor(clip.startTime * sampleRate);
+    const startSample = Math.floor(clipStart * sampleRate);
     const endSample = Math.min(
-      Math.floor((clip.startTime + clip.duration) * sampleRate),
+      Math.floor((clipStart + clipDuration) * sampleRate),
       fullIsolatedBuffer.length,
     );
-    const trimmedLength = endSample - startSample;
+    const trimmedLength = Math.max(1, endSample - startSample);
     const trimmedBuffer = engine.ctx.createBuffer(
       fullIsolatedBuffer.numberOfChannels,
       trimmedLength,
@@ -258,6 +268,8 @@ async function generateClipInternal(
       isolatedAudioKey: isolatedKey,
       waveformPeaks: peaks,
       inferredMetas,
+      audioDuration: clipDuration,
+      audioOffset: 0,
     });
 
     useGenerationStore.getState().updateJob(jobId, { status: 'done', progress: 'Done' });

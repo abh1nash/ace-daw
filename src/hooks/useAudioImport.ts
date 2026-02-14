@@ -69,6 +69,8 @@ export function useAudioImport() {
     updateClipStatus(clip.id, 'ready', {
       isolatedAudioKey: isolatedKey,
       waveformPeaks: peaks,
+      audioDuration: clipDuration,
+      audioOffset: 0,
     });
   }, [addTrack, addClip, updateClipStatus]);
 
