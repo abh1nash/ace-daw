@@ -51,10 +51,15 @@ export function ClipBlock({ clip, track }: ClipBlockProps) {
     e.stopPropagation();
     e.preventDefault();
 
+    // Lock position/duration while generation is in progress
+    const lockedStatuses = new Set(['queued', 'generating', 'processing']);
+    if (lockedStatuses.has(clip.generationStatus)) return;
+
     const mode = getDragMode(e);
     const startX = e.clientX;
     const origStart = clip.startTime;
     const origDuration = clip.duration;
+    const hasAudio = clip.generationStatus === 'ready' && clip.audioDuration != null;
     const origAudioOffset = clip.audioOffset ?? 0;
     const origAudioDuration = clip.audioDuration ?? clip.duration;
     const bpm = project?.bpm ?? 120;
@@ -70,7 +75,8 @@ export function ClipBlock({ clip, track }: ClipBlockProps) {
 
       if (mode === 'move') {
         let newStart = snapToGrid(origStart + deltaSec, bpm, 1);
-        newStart = Math.max(0, Math.min(newStart, totalDuration - origDuration));
+        newStart = Math.max(0, newStart);
+        if (hasAudio) newStart = Math.min(newStart, totalDuration - origDuration);
         updateClip(clip.id, { startTime: newStart });
       } else if (mode === 'resize-left') {
         // Dragging left edge: crops from the start of the audio
@@ -80,15 +86,19 @@ export function ClipBlock({ clip, track }: ClipBlockProps) {
         newStart = Math.min(newStart, maxStart);
 
         const shift = newStart - origStart;
-        // Constrain: can't crop past the audio buffer end
         let newAudioOffset = origAudioOffset + shift;
-        if (newAudioOffset < 0) {
-          newStart = origStart - origAudioOffset;
+        if (hasAudio) {
+          // Constrain: can't crop past the audio buffer boundaries
+          if (newAudioOffset < 0) {
+            newStart = origStart - origAudioOffset;
+            newAudioOffset = 0;
+          }
+          if (newAudioOffset > origAudioDuration - MIN_CLIP_DURATION) {
+            newAudioOffset = origAudioDuration - MIN_CLIP_DURATION;
+            newStart = origStart + (newAudioOffset - origAudioOffset);
+          }
+        } else {
           newAudioOffset = 0;
-        }
-        if (newAudioOffset > origAudioDuration - MIN_CLIP_DURATION) {
-          newAudioOffset = origAudioDuration - MIN_CLIP_DURATION;
-          newStart = origStart + (newAudioOffset - origAudioOffset);
         }
         const newDuration = origDuration + (origStart - newStart);
         updateClip(clip.id, { startTime: newStart, duration: newDuration, audioOffset: newAudioOffset });
@@ -96,10 +106,12 @@ export function ClipBlock({ clip, track }: ClipBlockProps) {
         // Dragging right edge: crops from the end of the audio
         let newDuration = snapToGrid(origDuration + deltaSec, bpm, 1);
         newDuration = Math.max(MIN_CLIP_DURATION, newDuration);
-        newDuration = Math.min(newDuration, totalDuration - origStart);
-        // Can't extend past audio buffer end
-        const maxDuration = origAudioDuration - origAudioOffset;
-        newDuration = Math.min(newDuration, maxDuration);
+        if (hasAudio) {
+          // Generated clip: can't extend past audio buffer or project end
+          newDuration = Math.min(newDuration, totalDuration - origStart);
+          const maxDuration = origAudioDuration - origAudioOffset;
+          newDuration = Math.min(newDuration, maxDuration);
+        }
         updateClip(clip.id, { duration: newDuration });
       }
     };
@@ -111,7 +123,7 @@ export function ClipBlock({ clip, track }: ClipBlockProps) {
 
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
-  }, [clip.id, clip.startTime, clip.duration, clip.audioOffset, clip.audioDuration, pixelsPerSecond, project, updateClip, getDragMode]);
+  }, [clip.id, clip.startTime, clip.duration, clip.audioOffset, clip.audioDuration, clip.generationStatus, pixelsPerSecond, project, updateClip, getDragMode]);
 
   const handleClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -133,16 +145,22 @@ export function ClipBlock({ clip, track }: ClipBlockProps) {
 
   const closeCtxMenu = useCallback(() => setCtxMenu(null), []);
 
+  const isLocked = clip.generationStatus === 'queued' || clip.generationStatus === 'generating' || clip.generationStatus === 'processing';
+
   const handleMouseMoveLocal = useCallback((e: React.MouseEvent) => {
+    const el = e.currentTarget as HTMLElement;
+    if (isLocked) {
+      el.style.cursor = 'not-allowed';
+      return;
+    }
     const rect = e.currentTarget.getBoundingClientRect();
     const relX = e.clientX - rect.left;
-    const el = e.currentTarget as HTMLElement;
     if (relX <= EDGE_HANDLE_PX || relX >= rect.width - EDGE_HANDLE_PX) {
       el.style.cursor = 'col-resize';
     } else {
       el.style.cursor = 'grab';
     }
-  }, []);
+  }, [isLocked]);
 
   const statusStyles: Record<string, string> = {
     empty: 'opacity-60',

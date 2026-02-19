@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { useProjectStore } from '../store/projectStore';
 import { useGenerationStore } from '../store/generationStore';
-import type { LegoTaskParams, TaskResultItem } from '../types/api';
+import type { ApiMode, LegoTaskParams, TaskResultItem } from '../types/api';
 import type { InferredMetas } from '../types/project';
 import * as api from './aceStepApi';
 import { generateSilenceWav } from './silenceGenerator';
@@ -89,6 +89,16 @@ async function getPreviousCumulativeBlob(clipId: string): Promise<Blob | null> {
   return null;
 }
 
+async function resolveModel(explicit: string): Promise<string> {
+  if (explicit) return explicit;
+  try {
+    const models = await api.listModels();
+    if (models.default_model) return models.default_model;
+    if (models.models.length) return models.models[0].name;
+  } catch { /* ignore */ }
+  return 'ACE-Step-v1.5';
+}
+
 async function generateClipInternal(
   clipId: string,
   previousCumulativeBlob: Blob | null,
@@ -115,93 +125,142 @@ async function generateClipInternal(
   store.updateClipStatus(clipId, 'queued', { generationJobId: jobId });
 
   try {
-    // Determine src_audio
-    const srcAudioBlob = previousCumulativeBlob ?? generateSilenceWav(project.totalDuration);
-
-    // Build instruction
-    const instruction = `Generate the ${track.trackName.toUpperCase().replace('_', ' ')} track based on the audio context:`;
-
-    // Build params — 'auto' = ACE-Step infers, null/undefined = project defaults, value = manual
+    // Resolve common parameters
     const resolvedBpm = clip.bpm === 'auto' ? null : (clip.bpm ?? project.bpm);
     const resolvedKey = clip.keyScale === 'auto' ? '' : (clip.keyScale ?? project.keyScale);
     const resolvedTimeSig = clip.timeSignature === 'auto' ? '' : String(clip.timeSignature ?? project.timeSignature);
-
-    const params: LegoTaskParams = {
-      task_type: 'lego',
-      track_name: track.trackName,
-      prompt: clip.prompt,
-      lyrics: clip.lyrics || '',
-      instruction,
-      repainting_start: clip.startTime,
-      repainting_end: clip.startTime + clip.duration,
-      audio_duration: project.totalDuration,
-      bpm: resolvedBpm,
-      key_scale: resolvedKey,
-      time_signature: resolvedTimeSig,
-      inference_steps: project.generationDefaults.inferenceSteps,
-      guidance_scale: project.generationDefaults.guidanceScale,
-      shift: project.generationDefaults.shift,
-      batch_size: 1,
-      audio_format: 'wav',
-      thinking: project.generationDefaults.thinking,
-      model: project.generationDefaults.model || undefined,
-    } as LegoTaskParams;
-
-    // Sample mode: send prompt as sample_query
-    if (clip.sampleMode) {
-      params.sample_mode = true;
-      params.sample_query = clip.prompt;
-    }
-
-    // Auto-expand prompt: controls whether LM rewrites the caption via CoT
-    if (clip.autoExpandPrompt === false) {
-      params.use_cot_caption = false;
-    }
 
     // Submit task
     useGenerationStore.getState().updateJob(jobId, { status: 'generating', progress: 'Submitting...' });
     useProjectStore.getState().updateClipStatus(clipId, 'generating');
 
-    const releaseResp = await api.releaseLegoTask(srcAudioBlob, params);
-    const taskId = releaseResp.task_id;
+    // Read API mode from config
+    const config = await api.getApiConfig();
+    const mode: ApiMode = config.mode ?? 'completion';
 
-    // Poll for completion
-    const startTime = Date.now();
-    let resultAudioPath: string | null = null;
-    let firstResult: TaskResultItem | null = null;
+    let cumulativeBlob: Blob;
+    let inferredMetas: InferredMetas | undefined;
 
-    while (Date.now() - startTime < MAX_POLL_DURATION_MS) {
-      await sleep(POLL_INTERVAL_MS);
+    if (mode === 'completion') {
+      // --- Completion mode: single synchronous request ---
+      const modelName = await resolveModel(project.generationDefaults.model);
 
-      const entries = await api.queryResult([taskId]);
-      const entry = entries?.[0];
-      if (!entry) continue;
+      // For the first track (no previous audio context), use text2music
+      const taskType = previousCumulativeBlob ? 'lego' : 'text2music';
 
-      useGenerationStore.getState().updateJob(jobId, {
-        progress: entry.progress_text || 'Generating...',
+      useGenerationStore.getState().updateJob(jobId, { progress: 'Generating (completion)...' });
+
+      const result = await api.generateCompletion({
+        model: modelName,
+        prompt: clip.prompt,
+        lyrics: clip.lyrics || '',
+        taskType,
+        srcAudioBlob: previousCumulativeBlob,
+        repaintingStart: clip.startTime,
+        repaintingEnd: clip.startTime + clip.duration,
+        duration: project.totalDuration,
+        bpm: resolvedBpm,
+        keyScale: resolvedKey,
+        timeSignature: resolvedTimeSig,
+        thinking: project.generationDefaults.thinking,
+        sampleMode: clip.sampleMode,
+        useCotCaption: clip.autoExpandPrompt === false ? false : undefined,
       });
 
-      if (entry.status === 1) {
-        // Done — result is a JSON string containing an array of {file, ...}
-        const resultItems: TaskResultItem[] = JSON.parse(entry.result);
-        firstResult = resultItems?.[0] ?? null;
-        resultAudioPath = firstResult?.file ?? null;
-        break;
-      } else if (entry.status === 2) {
-        throw new Error(`Generation failed: ${entry.result}`);
+      cumulativeBlob = result.audioBlob;
+      inferredMetas = {
+        bpm: result.metadata.bpm,
+        keyScale: result.metadata.keyScale,
+        timeSignature: result.metadata.timeSignature,
+        genres: result.metadata.genres,
+      };
+    } else {
+      // --- Native mode: release_task + polling ---
+      const srcAudioBlob = previousCumulativeBlob ?? generateSilenceWav(project.totalDuration);
+      const instruction = `Generate the ${track.trackName.toUpperCase().replace('_', ' ')} track based on the audio context:`;
+
+      const params: LegoTaskParams = {
+        task_type: 'lego',
+        track_name: track.trackName,
+        prompt: clip.prompt,
+        lyrics: clip.lyrics || '',
+        instruction,
+        repainting_start: clip.startTime,
+        repainting_end: clip.startTime + clip.duration,
+        audio_duration: project.totalDuration,
+        bpm: resolvedBpm,
+        key_scale: resolvedKey,
+        time_signature: resolvedTimeSig,
+        inference_steps: project.generationDefaults.inferenceSteps,
+        guidance_scale: project.generationDefaults.guidanceScale,
+        shift: project.generationDefaults.shift,
+        batch_size: 1,
+        audio_format: 'wav',
+        thinking: project.generationDefaults.thinking,
+        model: project.generationDefaults.model || undefined,
+      } as LegoTaskParams;
+
+      if (clip.sampleMode) {
+        params.sample_mode = true;
+        params.sample_query = clip.prompt;
       }
-      // status 0 = still processing
+      if (clip.autoExpandPrompt === false) {
+        params.use_cot_caption = false;
+      }
+
+      const releaseResp = await api.releaseLegoTask(srcAudioBlob, params);
+      const taskId = releaseResp.task_id;
+
+      // Poll for completion
+      const startTime = Date.now();
+      let resultAudioPath: string | null = null;
+      let firstResult: TaskResultItem | null = null;
+
+      while (Date.now() - startTime < MAX_POLL_DURATION_MS) {
+        await sleep(POLL_INTERVAL_MS);
+
+        const entries = await api.queryResult([taskId]);
+        const entry = entries?.[0];
+        if (!entry) continue;
+
+        useGenerationStore.getState().updateJob(jobId, {
+          progress: entry.progress_text || 'Generating...',
+        });
+
+        if (entry.status === 1) {
+          const resultItems: TaskResultItem[] = JSON.parse(entry.result);
+          firstResult = resultItems?.[0] ?? null;
+          resultAudioPath = firstResult?.file ?? null;
+          break;
+        } else if (entry.status === 2) {
+          throw new Error(`Generation failed: ${entry.result}`);
+        }
+      }
+
+      if (!resultAudioPath) {
+        throw new Error('Generation timed out');
+      }
+
+      useGenerationStore.getState().updateJob(jobId, { status: 'processing', progress: 'Downloading audio...' });
+      useProjectStore.getState().updateClipStatus(clipId, 'processing');
+
+      cumulativeBlob = await api.downloadAudio(resultAudioPath);
+
+      inferredMetas = firstResult
+        ? {
+            bpm: firstResult.metas?.bpm,
+            keyScale: firstResult.metas?.keyscale,
+            timeSignature: firstResult.metas?.timesignature,
+            genres: firstResult.metas?.genres,
+            seed: firstResult.seed_value,
+            ditModel: firstResult.dit_model,
+          }
+        : undefined;
     }
 
-    if (!resultAudioPath) {
-      throw new Error('Generation timed out');
-    }
-
-    // Download audio
-    useGenerationStore.getState().updateJob(jobId, { status: 'processing', progress: 'Downloading audio...' });
+    // --- Shared post-processing (both modes) ---
+    useGenerationStore.getState().updateJob(jobId, { status: 'processing', progress: 'Processing audio...' });
     useProjectStore.getState().updateClipStatus(clipId, 'processing');
-
-    const cumulativeBlob = await api.downloadAudio(resultAudioPath);
 
     // Store cumulative mix
     const cumulativeKey = await saveAudioBlob(project.id, clipId, 'cumulative', cumulativeBlob);
@@ -222,8 +281,7 @@ async function generateClipInternal(
     const clipStart = currentClip?.startTime ?? clip.startTime;
     const clipDuration = currentClip?.duration ?? clip.duration;
 
-    // Trim isolated audio to just the clip's time region so the buffer
-    // represents only the clip's audio (not the full project duration).
+    // Trim isolated audio to just the clip's time region
     const sampleRate = fullIsolatedBuffer.sampleRate;
     const startSample = Math.floor(clipStart * sampleRate);
     const endSample = Math.min(
@@ -247,20 +305,8 @@ async function generateClipInternal(
     const isolatedBlob = audioBufferToWavBlob(trimmedBuffer);
     const isolatedKey = await saveAudioBlob(project.id, clipId, 'isolated', isolatedBlob);
 
-    // Compute waveform peaks from the trimmed buffer (full buffer = clip region)
+    // Compute waveform peaks from the trimmed buffer
     const peaks = computeWaveformPeaks(trimmedBuffer, 200);
-
-    // Build inferred metadata from result
-    const inferredMetas: InferredMetas | undefined = firstResult
-      ? {
-          bpm: firstResult.metas?.bpm,
-          keyScale: firstResult.metas?.keyscale,
-          timeSignature: firstResult.metas?.timesignature,
-          genres: firstResult.metas?.genres,
-          seed: firstResult.seed_value,
-          ditModel: firstResult.dit_model,
-        }
-      : undefined;
 
     // Update clip as ready
     useProjectStore.getState().updateClipStatus(clipId, 'ready', {

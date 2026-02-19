@@ -1,3 +1,43 @@
+export type ApiMode = 'completion' | 'native';
+
+export type CompletionContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'input_audio'; input_audio: { data: string; format: string } };
+
+export interface CompletionRequest {
+  model: string;
+  messages: { role: 'user'; content: string | CompletionContentPart[] }[];
+  stream: false;
+  thinking?: boolean;
+  sample_mode?: boolean;
+  use_format?: boolean;
+  use_cot_caption?: boolean;
+  batch_size?: number;
+  task_type?: string;
+  repainting_start?: number;
+  repainting_end?: number;
+  audio_config?: {
+    duration?: number;
+    format?: string;
+    bpm?: number;
+    key_scale?: string;
+    time_signature?: string;
+    vocal_language?: string;
+  };
+}
+
+export interface CompletionResponse {
+  id: string;
+  choices: {
+    message: {
+      role: string;
+      content: string;
+      audio?: { type: string; audio_url: { url: string } }[];
+    };
+    finish_reason: string;
+  }[];
+}
+
 export interface LegoTaskParams {
   task_type: 'lego';
   track_name: string;
